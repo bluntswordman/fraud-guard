@@ -33,8 +33,6 @@ amount NUMERIC(18,2) NOT NULL
 - Tidak ada floating-point error seperti pada `FLOAT` atau `DOUBLE`.
 - Sangat penting untuk perhitungan keuangan.
 
-> 💡 **Interview tip**: "Saya menggunakan `NUMERIC(18,2)` di PostgreSQL untuk menghindari floating-point error. Jumlah digit total 18, dengan 2 digit di belakang koma."
-
 #### 2. Tipe Data `BOOLEAN` Native
 
 ```sql
