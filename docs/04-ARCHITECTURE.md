@@ -58,10 +58,10 @@ Diagram di atas juga tersedia dalam format Mermaid agar bisa dirender otomatis d
 
 ```mermaid
 graph LR
-    subgraph fraudguard-net["Docker Network: fraudguard-net"]
+    subgraph fraudguard_net["Docker Network: fraudguard-net"]
         ING["Ingestion Service<br/>Port 7777<br/>• Load CSV<br/>• Java Stream<br/>• Publish event"]
         DET["Detection Service<br/>Port 7778<br/>• Spring IoC<br/>• Strategy Pattern<br/>• Subscribe event"]
-        DB[(PostgreSQL 15<br/>• NUMERIC(18,2)<br/>• BOOLEAN native<br/>• Updatable CTE)]
+        DB["PostgreSQL 15<br/>• NUMERIC 18,2<br/>• BOOLEAN native<br/>• Updatable CTE"]
         REDIS["Redis 7<br/>• Pub/Sub Broker<br/>• In-Memory Cache"]
     end
 
