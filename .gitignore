@@ -1,0 +1,13 @@
+### VS Code ###
+.vscode/
+
+### Others
+graphify-out
+tasks
+dataset
+native-design.md
+.DS_Store
+
+### Postman
+# *.postman_collection.json
+# *.postman_environment.json

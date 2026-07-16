@@ -1,0 +1,878 @@
+{
+  "info": {
+    "name": "FraudGuard",
+    "description": "Real-time fraud detection platform — ingestion-svc (7777) + detection-svc (7778)\n\n=== CARA PAKAI ===\n1. Buka folder skenario (Membership / Bank / E-Commerce)\n2. Jalankan ✅ Positive Case dulu (harus sukses, CLEAN)\n3. Jalankan ❌ Negative Case (harus FRAUD atau 4xx error)\n4. Cek hasil via GET /api/transactions/{id} (cek isFlaggedFraud)\n5. Lihat fraud breakdown via GET /stats?tenantId=MEMBERSHIP\n6. Webhook akan auto-terkirim jika diaktifkan (default: disabled)\n\n=== DETECTION FLOW ===\nPOST /transactions → Ingestion → DB → Redis Pub/Sub → Detection → Webhook/Redis result\n\n=== NOTE ===\nWebhook disabled by default (fraudguard.webhook.enabled=false).\nDetection tetap berjalan normal — cek hasil via GET /api/transactions/{id}.\nAktifkan webhook dengan set property ke true + restart detection-svc.\nPOST /transactions → Ingestion → DB → Redis Pub/Sub → Detection → Webhook/Redis result",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "1. Membership — Loyalty Point System",
+      "description": "=== LIFECYCLE RULES ===\n• TOPUP  → selalu diizinkan (tidak ada syarat)\n• REDEEM → harus ada TOPUP duluan (user yang sama, tenant yang sama)\n• EARN   → harus ada REDEEM duluan (user yang sama, tenant yang sama)\n\n=== URUTAN POSITIVE CASE ===\n1. POST /webhooks (register URL callback)\n2. POST TOPUP    → expected: CLEAN\n3. POST REDEEM   → expected: CLEAN (ada prior TOPUP)\n4. POST EARN     → expected: CLEAN (ada prior REDEEM)\n\n=== URUTAN NEGATIVE CASE ===\n1. POST REDEEM (user baru) → expected: FRAUD, isFlaggedFraud=true\n2. POST EARN   (user baru) → expected: FRAUD, isFlaggedFraud=true\n\nSetiap FRAUD → Webhook otomatis terkirim ke URL yang didaftarkan → Membership BLOCK transaksi",
+      "item": [
+        {
+          "name": "=== ✅ POSITIVE CASES (expected: CLEAN) ===",
+          "item": [
+            {
+              "name": "1. Setup — Register Webhook Callback",
+              "request": {
+                "method": "POST",
+                "description": "Setup awal: daftarkan URL callback Membership agar terima alert fraud. HTTPS only, private IP blocked.",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\"tenantId\":\"MEMBERSHIP\",\"url\":\"https://membership.example.com/webhook\",\"secret\":\"sec-membership-2026\"}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{detection_url}}/api/webhooks",
+                  "host": [
+                    "{{detection_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "webhooks"
+                  ]
+                }
+              }
+            },
+            {
+              "name": "2. TOPUP — User isi saldo loyalty point",
+              "request": {
+                "method": "POST",
+                "description": "✅ EXPECTED: 200 OK, lifecycle CLEAN\nUser USER_A topup 500rb. TOPUP selalu diizinkan — LifecycleCheck skip.\nnameOrig=ID user, nameDest=SYSTEM, tenantId=MEMBERSHIP.\noldBalanceOrg=0 → newBalanceOrig=500000 (konsisten, BalanceAnomaly juga skip).",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\"step\":1,\"type\":\"TOPUP\",\"amount\":500000.00,\"nameOrig\":\"USER_A\",\"nameDest\":\"SYSTEM\",\"oldBalanceOrg\":0,\"newBalanceOrig\":500000.00,\"tenantId\":\"MEMBERSHIP\"}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{ingestion_url}}/api/transactions",
+                  "host": [
+                    "{{ingestion_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "transactions"
+                  ]
+                }
+              }
+            },
+            {
+              "name": "3. REDEEM — User tukar point beli product",
+              "request": {
+                "method": "POST",
+                "description": "✅ EXPECTED: 200 OK, lifecycle CLEAN\nUSER_A redeem 250rb. LifecycleCheck cek: USER_A punya TOPUP di step sebelumnya? YES → CLEAN.\nSaldo: 500rb → 250rb (konsisten). nameDest berisi ID tiket/tujuan.",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\"step\":2,\"type\":\"REDEEM\",\"amount\":250000.00,\"nameOrig\":\"USER_A\",\"nameDest\":\"PRODUCT_BOOKING_SHUTTLE\",\"oldBalanceOrg\":500000.00,\"newBalanceOrig\":250000.00,\"tenantId\":\"MEMBERSHIP\"}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{ingestion_url}}/api/transactions",
+                  "host": [
+                    "{{ingestion_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "transactions"
+                  ]
+                }
+              }
+            },
+            {
+              "name": "4. EARN — User dapat point setelah trip selesai",
+              "request": {
+                "method": "POST",
+                "description": "✅ EXPECTED: 200 OK, lifecycle CLEAN\nUSER_A dapat 5000 point reward. LifecycleCheck cek: USER_A punya REDEEM sebelumnya? YES → CLEAN.\nSaldo: 250rb → 255rb (konsisten). Ini mencegah klaim point tanpa pernah booking.",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\"step\":3,\"type\":\"EARN\",\"amount\":5000.00,\"nameOrig\":\"USER_A\",\"nameDest\":\"SYSTEM\",\"oldBalanceOrg\":250000.00,\"newBalanceOrig\":255000.00,\"tenantId\":\"MEMBERSHIP\"}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{ingestion_url}}/api/transactions",
+                  "host": [
+                    "{{ingestion_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "transactions"
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "=== ❌ NEGATIVE CASES (expected: FRAUD) ===",
+          "item": [
+            {
+              "name": "1. REDEEM tanpa TOPUP — User tidak punya saldo",
+              "request": {
+                "method": "POST",
+                "description": "❌ EXPECTED: isFlaggedFraud=true, triggered=[LifecycleCheck]\nUser HACKER_1 coba redeem 100rb padahal belum pernah TOPUP.\nLifecycleCheck: REDEEM butuh prior TOPUP → TIDAK DITEMUKAN → FRAUD!\nWebhook otomatis terkirim → Membership harus BLOCK transaksi ini.",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\"step\":1,\"type\":\"REDEEM\",\"amount\":100000.00,\"nameOrig\":\"HACKER_1\",\"nameDest\":\"PRODUCT_BOOKING\",\"oldBalanceOrg\":0,\"newBalanceOrig\":0,\"tenantId\":\"MEMBERSHIP\"}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{ingestion_url}}/api/transactions",
+                  "host": [
+                    "{{ingestion_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "transactions"
+                  ]
+                }
+              }
+            },
+            {
+              "name": "2. EARN tanpa REDEEM — User klaim point tanpa booking",
+              "request": {
+                "method": "POST",
+                "description": "❌ EXPECTED: isFlaggedFraud=true, triggered=[LifecycleCheck]\nUser HACKER_2 coba klaim 10rb point EARN tanpa pernah booking/redeem.\nLifecycleCheck: EARN butuh prior REDEEM → TIDAK DITEMUKAN → FRAUD!\nWebhook otomatis terkirim → BLOCK.",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\"step\":1,\"type\":\"EARN\",\"amount\":10000.00,\"nameOrig\":\"HACKER_2\",\"nameDest\":\"SYSTEM\",\"oldBalanceOrg\":0,\"newBalanceOrig\":10000.00,\"tenantId\":\"MEMBERSHIP\"}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{ingestion_url}}/api/transactions",
+                  "host": [
+                    "{{ingestion_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "transactions"
+                  ]
+                }
+              }
+            },
+            {
+              "name": "3. EARN setelah TOPUP — tapi tidak ada REDEEM",
+              "request": {
+                "method": "POST",
+                "description": "❌ EXPECTED: isFlaggedFraud=true, triggered=[LifecycleCheck]\nUSER_A (yang tadi sudah TOPUP) coba langsung EARN tanpa REDEEM.\nLifecycleCheck: EARN butuh REDEEM, bukan TOPUP → TIDAK ADA REDEEM → FRAUD!\nIni mencegah user mengklaim point hanya dari topup tanpa booking produk.",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\"step\":2,\"type\":\"EARN\",\"amount\":5000.00,\"nameOrig\":\"USER_A\",\"nameDest\":\"SYSTEM\",\"oldBalanceOrg\":500000.00,\"newBalanceOrig\":505000.00,\"tenantId\":\"MEMBERSHIP\"}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{ingestion_url}}/api/transactions",
+                  "host": [
+                    "{{ingestion_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "transactions"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "2. Bank — Transfer Anti-Fraud",
+      "description": "=== DETECTION RULES ===\n• VelocityCheck:  >3 transaksi TRANSFER/CASH_OUT dalam 2 step → FRAUD\n• BalanceAnomaly: saldo habis total ATAU saldo nol tapi transaksi besar → FRAUD\n\n=== URUTAN POSITIVE CASE ===\n1. POST /webhooks (register)\n2. Transfer normal (1-3 kali) → CLEAN\n\n=== URUTAN NEGATIVE CASE ===\n1. Transfer >3 kali dalam window → FRAUD (VelocityCheck)\n2. Transfer habiskan saldo → FRAUD (BalanceAnomaly)\n3. Transfer besar dari saldo 0 → FRAUD (BalanceAnomaly)",
+      "item": [
+        {
+          "name": "=== ✅ POSITIVE CASES ===",
+          "item": [
+            {
+              "name": "1. Setup — Register Webhook",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\"tenantId\":\"BANK\",\"url\":\"https://bank.example.com/webhook\",\"secret\":\"sec-bank-2026\"}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{detection_url}}/api/webhooks",
+                  "host": [
+                    "{{detection_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "webhooks"
+                  ]
+                }
+              }
+            },
+            {
+              "name": "2. Transfer Normal — 1 transaksi",
+              "request": {
+                "method": "POST",
+                "description": "✅ EXPECTED: 200 OK, CLEAN\nCUSTOMER_A transfer 500rb ke CUSTOMER_B. Saldo awal 5.1jt → sisa 4.6jt (konsisten).\nVelocityCheck: hanya 1 transaksi, di bawah threshold 3 → CLEAN.\nBalanceAnomaly: saldo akhir >0, saldo awal >0 → CLEAN.",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\"step\":1,\"type\":\"TRANSFER\",\"amount\":500000.00,\"nameOrig\":\"CUSTOMER_A\",\"nameDest\":\"CUSTOMER_B\",\"oldBalanceOrg\":5100000.00,\"newBalanceOrig\":4600000.00,\"tenantId\":\"BANK\"}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{ingestion_url}}/api/transactions",
+                  "host": [
+                    "{{ingestion_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "transactions"
+                  ]
+                }
+              }
+            },
+            {
+              "name": "3. CASH_OUT Normal — Penarikan Tunai",
+              "request": {
+                "method": "POST",
+                "description": "✅ EXPECTED: 200 OK, CLEAN\nCUSTOMER_A tarik tunai 200rb. CASH_OUT juga dicek VelocityCheck + BalanceAnomaly.\nSaldo konsisten: 4.6jt → 4.4jt. Masih di bawah threshold velocity.",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\"step\":1,\"type\":\"CASH_OUT\",\"amount\":200000.00,\"nameOrig\":\"CUSTOMER_A\",\"nameDest\":\"ATM_BCA\",\"oldBalanceOrg\":4600000.00,\"newBalanceOrig\":4400000.00,\"tenantId\":\"BANK\"}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{ingestion_url}}/api/transactions",
+                  "host": [
+                    "{{ingestion_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "transactions"
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "=== ❌ NEGATIVE CASES ===",
+          "item": [
+            {
+              "name": "1. Velocity Fraud — >3 Transfer dalam 1 Step",
+              "request": {
+                "method": "POST",
+                "description": "❌ EXPECTED: isFlaggedFraud=true, triggered=[VelocityCheck]\nCARA TEST: Kirim request ini 4x berturut-turut (pakai Postman Runner atau klik Send 4x).\n• Transfer ke-1: CLEAN  • Transfer ke-4: FRAUD (VelocityCheck >3 in window)\n• Transfer ke-2: CLEAN  • Webhook otomatis terkirim → BLOCK\n• Transfer ke-3: CLEAN\nIni mensimulasikan bot/script yang transfer berkali-kali dalam waktu singkat.",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\"step\":2,\"type\":\"TRANSFER\",\"amount\":100000.00,\"nameOrig\":\"BOT_ACCOUNT\",\"nameDest\":\"DEST_1\",\"oldBalanceOrg\":5000000.00,\"newBalanceOrig\":4900000.00,\"tenantId\":\"BANK\"}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{ingestion_url}}/api/transactions",
+                  "host": [
+                    "{{ingestion_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "transactions"
+                  ]
+                }
+              }
+            },
+            {
+              "name": "2. Balance Drain — Transfer habiskan saldo",
+              "request": {
+                "method": "POST",
+                "description": "❌ EXPECTED: isFlaggedFraud=true, triggered=[BalanceAnomaly]\nCUSTOMER_VICTIM transfer seluruh saldo: oldBalance=5.1jt → newBalance=0.\nBalanceAnomaly deteksi pengurasan total → FRAUD!\nIni pola umum pencurian akun — penyerang transfer semua dana keluar.\nWebhook otomatis → BLOCK transaksi.",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\"step\":1,\"type\":\"TRANSFER\",\"amount\":5100000.00,\"nameOrig\":\"CUSTOMER_VICTIM\",\"nameDest\":\"CUSTOMER_PENIPU\",\"oldBalanceOrg\":5100000.00,\"newBalanceOrig\":0,\"tenantId\":\"BANK\"}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{ingestion_url}}/api/transactions",
+                  "host": [
+                    "{{ingestion_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "transactions"
+                  ]
+                }
+              }
+            },
+            {
+              "name": "3. Balance Anomaly — Transfer besar dari saldo 0",
+              "request": {
+                "method": "POST",
+                "description": "❌ EXPECTED: isFlaggedFraud=true, triggered=[BalanceAnomaly]\nAkun dengan saldo 0 tiba-tiba transfer >500rb. Tidak mungkin tanpa topup duluan.\nBalanceAnomaly: oldBalance=0 AND amount>500rb → FRAUD!\nIni pola akun fake yang langsung transfer besar tanpa histori.",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\"step\":1,\"type\":\"TRANSFER\",\"amount\":1000000.00,\"nameOrig\":\"FAKE_ACCOUNT\",\"nameDest\":\"CUSTOMER_PENIPU\",\"oldBalanceOrg\":0,\"newBalanceOrig\":0,\"tenantId\":\"BANK\"}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{ingestion_url}}/api/transactions",
+                  "host": [
+                    "{{ingestion_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "transactions"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "3. E-Commerce / E-Wallet — Non-Risky Transactions",
+      "description": "=== RULES ===\nPAYMENT, CASH_IN, DEBIT → TIDAK dicek oleh strategy bawaan.\nSemua strategy (VelocityCheck, BalanceAnomaly, LifecycleCheck) akan SKIP.\nSelalu CLEAN — cocok untuk marketplace, e-wallet, subscription.\n\nTetap kirim transaksi agar masuk ke Stats dan Evaluation untuk analytics.",
+      "item": [
+        {
+          "name": "=== ✅ POSITIVE CASES (always CLEAN) ===",
+          "item": [
+            {
+              "name": "1. PAYMENT — Pembayaran di Marketplace",
+              "request": {
+                "method": "POST",
+                "description": "✅ EXPECTED: 200 OK, CLEAN\nCustomer beli barang di marketplace. Tipe PAYMENT non-risky.\nSemua strategy skip — tidak ada fraud check.\nnameOrig=customer, nameDest=merchant.",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\"step\":1,\"type\":\"PAYMENT\",\"amount\":150000.00,\"nameOrig\":\"CUST_001\",\"nameDest\":\"MERCHANT_TOKO_A\",\"tenantId\":\"ECOMMERCE\"}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{ingestion_url}}/api/transactions",
+                  "host": [
+                    "{{ingestion_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "transactions"
+                  ]
+                }
+              }
+            },
+            {
+              "name": "2. CASH_IN — Topup Saldo E-Wallet",
+              "request": {
+                "method": "POST",
+                "description": "✅ EXPECTED: 200 OK, CLEAN\nUser topup e-wallet dari ATM/bank. Tipe CASH_IN non-risky.\nnameOrig=sumber dana (ATM/BANK), nameDest=wallet user.",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\"step\":1,\"type\":\"CASH_IN\",\"amount\":200000.00,\"nameOrig\":\"ATM_BCA\",\"nameDest\":\"WALLET_USER_1\",\"tenantId\":\"EWALLET\"}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{ingestion_url}}/api/transactions",
+                  "host": [
+                    "{{ingestion_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "transactions"
+                  ]
+                }
+              }
+            },
+            {
+              "name": "3. DEBIT — Auto-Debit Subscription",
+              "request": {
+                "method": "POST",
+                "description": "✅ EXPECTED: 200 OK, CLEAN\nAuto-debit bulanan untuk langganan Netflix/Spotify. Tipe DEBIT non-risky.\nnameDest=merchant subscription.",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\"step\":1,\"type\":\"DEBIT\",\"amount\":49900.00,\"nameOrig\":\"CUST_001\",\"nameDest\":\"SERVICE_SUBSCRIPTION\",\"tenantId\":\"ECOMMERCE\"}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{ingestion_url}}/api/transactions",
+                  "host": [
+                    "{{ingestion_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "transactions"
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "=== ❌ NEGATIVE CASES (validation errors) ===",
+          "item": [
+            {
+              "name": "1. tenantId kosong — Missing Required Field",
+              "request": {
+                "method": "POST",
+                "description": "❌ EXPECTED: 400 Bad Request, errorCode=ING-006\ntenantId WAJIB diisi. Tanpa tenantId, sistem tidak tahu transaksi ini milik siapa.\nValidasi: @NotBlank pada TransactionRequest.tenantId.",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\"type\":\"PAYMENT\",\"amount\":100000.00,\"nameOrig\":\"CUST_001\",\"nameDest\":\"MERCHANT_A\",\"tenantId\":\"\"}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{ingestion_url}}/api/transactions",
+                  "host": [
+                    "{{ingestion_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "transactions"
+                  ]
+                }
+              }
+            },
+            {
+              "name": "2. Amount negatif — Invalid Amount",
+              "request": {
+                "method": "POST",
+                "description": "❌ EXPECTED: 400 Bad Request\namount harus >0 (@Positive). Amount negatif atau 0 akan ditolak.\nIni mencegah transaksi invalid masuk ke sistem.",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\"type\":\"PAYMENT\",\"amount\":-100000.00,\"nameOrig\":\"CUST_001\",\"nameDest\":\"MERCHANT_A\",\"tenantId\":\"ECOMMERCE\"}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{ingestion_url}}/api/transactions",
+                  "host": [
+                    "{{ingestion_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "transactions"
+                  ]
+                }
+              }
+            },
+            {
+              "name": "3. Webhook — Daftar URL HTTP ditolak",
+              "request": {
+                "method": "POST",
+                "description": "❌ EXPECTED: 400 Bad Request\nURL webhook HARUS HTTPS. HTTP ditolak oleh SSRF protection (ASVS A10).\nIni mencegah data fraud bocor lewat koneksi tidak aman.",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\"tenantId\":\"TEST\",\"url\":\"http://example.com/webhook\",\"secret\":\"x\"}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{detection_url}}/api/webhooks",
+                  "host": [
+                    "{{detection_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "webhooks"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "4. Management & Monitoring",
+      "description": "Health check, statistik, evaluasi model, manajemen webhook.\nGunakan folder ini untuk monitoring dan audit setelah menjalankan skenario.",
+      "item": [
+        {
+          "name": "=== HEALTH ===",
+          "item": [
+            {
+              "name": "Health Check — Ingestion (7777)",
+              "request": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{ingestion_url}}/actuator/health",
+                  "host": [
+                    "{{ingestion_url}}"
+                  ],
+                  "path": [
+                    "actuator",
+                    "health"
+                  ]
+                }
+              }
+            },
+            {
+              "name": "Health Check — Detection (7778)",
+              "request": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{detection_url}}/actuator/health",
+                  "host": [
+                    "{{detection_url}}"
+                  ],
+                  "path": [
+                    "actuator",
+                    "health"
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "=== STATISTICS ===",
+          "item": [
+            {
+              "name": "Get Transaction by ID — Cek Status Fraud",
+              "request": {
+                "method": "GET",
+                "description": "Cek detail + status deteksi fraud untuk satu transaksi. Gunakan setelah POST /api/transactions. Deteksi berjalan async via Redis — tunggu 2-3 detik lalu cek isFlaggedFraud.\n\nResponse:\n{\n  \"data\": {\n    \"id\": 5,\n    \"type\": \"REDEEM\",\n    \"amount\": 100000,\n    \"nameOrig\": \"HACKER_1\",\n    \"tenantId\": \"MEMBERSHIP\",\n    \"isFraud\": false,          // ground truth (dari dataset)\n    \"isFlaggedFraud\": true      // hasil deteksi ← yang dicek\n  }\n}\n\nTips: ganti 5 dengan ID transaksi yang baru di-POST.",
+                "url": {
+                  "raw": "{{ingestion_url}}/api/transactions/5",
+                  "host": [
+                    "{{ingestion_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "transactions",
+                    "5"
+                  ]
+                }
+              }
+            },
+            {
+              "name": "Get Stats — Ringkasan Transaksi",
+              "request": {
+                "method": "GET",
+                "description": "Ringkasan transaksi + fraud breakdown per tenant.\n\nFields:\n• totalTransactions: semua transaksi\n• totalFlaggedFraud: jumlah yang kena flag fraud\n• totalClean: total - flaggedFraud\n• transactionsByType: jumlah per tipe\n• flaggedFraudByType: jumlah fraud per tipe\n\nGunakan ?tenantId= untuk filter. Kosongkan untuk semua tenant.",
+                "url": {
+                  "raw": "{{ingestion_url}}/api/transactions/stats",
+                  "host": [
+                    "{{ingestion_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "transactions",
+                    "stats"
+                  ],
+                  "query": [
+                    {
+                      "key": "tenantId",
+                      "value": "MEMBERSHIP",
+                      "description": "Filter per tenant (opsional). Kosongkan untuk lihat semua."
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "name": "Get Evaluation — Akurasi Model Deteksi",
+              "request": {
+                "method": "GET",
+                "description": "Precision, Recall, F1, Accuracy per tenant. Gunakan query param ?tenantId= untuk filter. Butuh ground truth (isFraud=true) di data untuk hasil meaningful.",
+                "url": {
+                  "raw": "{{ingestion_url}}/api/transactions/evaluation",
+                  "host": [
+                    "{{ingestion_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "transactions",
+                    "evaluation"
+                  ],
+                  "query": [
+                    {
+                      "key": "tenantId",
+                      "value": "MEMBERSHIP",
+                      "description": "Filter per tenant (opsional). Kosongkan untuk evaluasi semua tenant."
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "=== WEBHOOK MANAGEMENT ===",
+          "item": [
+            {
+              "name": "List Webhooks per Tenant",
+              "request": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{detection_url}}/api/webhooks?tenantId=MEMBERSHIP",
+                  "host": [
+                    "{{detection_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "webhooks"
+                  ],
+                  "query": [
+                    {
+                      "key": "tenantId",
+                      "value": "MEMBERSHIP"
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "name": "Delete Webhook by ID",
+              "request": {
+                "method": "DELETE",
+                "url": {
+                  "raw": "{{detection_url}}/api/webhooks/1",
+                  "host": [
+                    "{{detection_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "webhooks",
+                    "1"
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "=== BATCH UPLOAD ===",
+          "item": [
+            {
+              "name": "Upload CSV Batch",
+              "request": {
+                "method": "POST",
+                "description": "Upload file CSV transaksi. Header: step,type,amount,nameOrig,nameDest (case-insensitive). Max 200MB, batch 1000 rows. tenantId=PAYSIM (default). Duplikat auto-skip.",
+                "header": [],
+                "body": {
+                  "mode": "formdata",
+                  "formdata": [
+                    {
+                      "key": "file",
+                      "description": "File CSV (.csv)",
+                      "type": "file",
+                      "src": []
+                    }
+                  ]
+                },
+                "url": {
+                  "raw": "{{ingestion_url}}/api/transactions/upload",
+                  "host": [
+                    "{{ingestion_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "transactions",
+                    "upload"
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "=== REDIS RESULT CHANNEL ===",
+          "item": [
+            {
+              "name": "Subscribe (redis-cli) — fraudguard.result.channel",
+              "request": {
+                "method": "GET",
+                "description": "Cara subscribe hasil deteksi via Redis CLI:\nredis-cli -p 6380 SUBSCRIBE fraudguard.result.channel\n\nPayload yang diterima:\n{\"txId\":123,\"tenantId\":\"MEMBERSHIP\",\"isFlaggedFraud\":true,\"triggeredRules\":[\"LifecycleCheck\"],\"evaluatedAt\":\"2026-07-16T14:32:41Z\"}",
+                "url": {
+                  "raw": "redis://localhost:6380",
+                  "host": [
+                    "localhost"
+                  ],
+                  "port": "6380"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

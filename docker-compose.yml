@@ -1,0 +1,93 @@
+name: fraudguard
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: fraudguard-postgres
+    environment:
+      POSTGRES_DB: ${DB_NAME:-fraudguard}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASS:-postgres}
+    ports:
+      - "${DB_PORT:-5433}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-fraudguard}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - fraudguard-net
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: fraudguard-redis
+    ports:
+      - "${REDIS_PORT:-6380}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - fraudguard-net
+    restart: unless-stopped
+
+  ingestion-svc:
+    build:
+      context: ./ingestion-svc
+      dockerfile: Dockerfile
+    container_name: fraudguard-ingestion
+    ports:
+      - "${INGESTION_PORT:-7777}:7777"
+    environment:
+      SERVER_PORT: "7777"
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: ${DB_NAME:-fraudguard}
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASS: ${DB_PASS:-postgres}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - fraudguard-net
+    restart: unless-stopped
+
+  detection-svc:
+    build:
+      context: ./detection-svc
+      dockerfile: Dockerfile
+    container_name: fraudguard-detection
+    ports:
+      - "${DETECTION_PORT:-7778}:7778"
+    environment:
+      SERVER_PORT: "7778"
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: ${DB_NAME:-fraudguard}
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASS: ${DB_PASS:-postgres}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - fraudguard-net
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+
+networks:
+  fraudguard-net:
+    driver: bridge
